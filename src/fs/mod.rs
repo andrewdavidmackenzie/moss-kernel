@@ -1,0 +1,318 @@
+use alloc::boxed::Box;
+use alloc::{collections::btree_map::BTreeMap, sync::Arc};
+use async_trait::async_trait;
+use core::sync::atomic::{AtomicU64, Ordering};
+use dir::DirFile;
+use libkernel::error::{FsError, KernelError, Result};
+use libkernel::fs::path::Path;
+use libkernel::fs::{BlockDevice, FS_ID_START, FileType, Filesystem, Inode, InodeId, OpenFlags};
+use open_file::OpenFile;
+use reg::RegFile;
+
+use crate::drivers::{DM, Driver};
+use crate::sync::SpinLock;
+
+pub mod dir;
+pub mod fops;
+pub mod open_file;
+pub mod pipe;
+pub mod reg;
+pub mod syscalls;
+
+/// A dummy inode used as a placeholder before the root filesystem is mounted.
+pub struct DummyInode {}
+
+impl Inode for DummyInode {
+    fn id(&self) -> InodeId {
+        InodeId::dummy()
+    }
+}
+
+/// Represents a mounted filesystem.
+struct Mount {
+    fs: Arc<dyn Filesystem>,
+    root_inode: Arc<dyn Inode>,
+}
+
+/// This trait represents a type of filesystem, like "ext4" or "tmpfs". It acts
+/// as a factory for creating mounted instances.
+#[async_trait]
+pub trait FilesystemDriver: Driver + Send + Sync {
+    async fn construct(
+        &self,
+        fs_id: u64,
+        blk_dev: Option<Box<dyn BlockDevice>>,
+    ) -> Result<Arc<dyn Filesystem>>;
+}
+
+/// The internal state of the VFS.
+///
+/// This struct consolidates the filesystem-wide collections (the list of all
+/// registered filesystem instances and the mapping of mount points).
+struct VfsState {
+    /// A map from an InodeId of a directory to the Mount that is mounted there.
+    mounts: BTreeMap<InodeId, Mount>,
+    /// A map from a filesystem ID to the corresponding filesystem instance.
+    filesystems: BTreeMap<u64, Arc<dyn Filesystem>>,
+}
+
+impl VfsState {
+    /// Creates a new, empty VfsState.
+    const fn new() -> Self {
+        Self {
+            mounts: BTreeMap::new(),
+            filesystems: BTreeMap::new(),
+        }
+    }
+
+    /// Registers a new filesystem and its mount point.
+    fn add_mount(&mut self, mount_point_id: InodeId, mount: Mount) {
+        self.filesystems.insert(mount.fs.id(), mount.fs.clone());
+        self.mounts.insert(mount_point_id, mount);
+    }
+
+    /// Checks if an inode is a mount point and returns the root inode of the
+    /// mounted filesystem if it is.
+    fn get_mount_root(&self, inode_id: &InodeId) -> Option<Arc<dyn Inode>> {
+        self.mounts
+            .get(inode_id)
+            .map(|mount| mount.root_inode.clone())
+    }
+}
+
+#[allow(clippy::upper_case_acronyms)]
+pub struct VFS {
+    next_fs_id: AtomicU64,
+    state: SpinLock<VfsState>,
+    root_inode: SpinLock<Option<Arc<dyn Inode>>>,
+}
+
+impl VFS {
+    const fn new() -> Self {
+        Self {
+            next_fs_id: AtomicU64::new(FS_ID_START),
+            state: SpinLock::new(VfsState::new()),
+            root_inode: SpinLock::new(None),
+        }
+    }
+
+    /// Creates an instance of a filesystem from a registered driver.
+    ///
+    /// This does not mount the filesystem, but prepares an instance that can
+    /// then be attached to a mount point.
+    async fn create_fs_instance(
+        &self,
+        driver_name: &str,
+        blkdev: Option<Box<dyn BlockDevice>>,
+    ) -> Result<Arc<dyn Filesystem>> {
+        let driver = DM
+            .lock_save_irq()
+            .find_by_name(driver_name)
+            .ok_or(FsError::DriverNotFound)?
+            .as_filesystem_driver()
+            .ok_or(FsError::DriverNotFound)?;
+
+        let id = self.next_fs_id.fetch_add(1, Ordering::SeqCst);
+
+        driver.construct(id, blkdev).await
+    }
+
+    /// Mounts the root filesystem.
+    pub async fn mount_root(
+        &self,
+        driver_name: &str,
+        blkdev: Option<Box<dyn BlockDevice>>,
+    ) -> Result<()> {
+        let fs = self.create_fs_instance(driver_name, blkdev).await?;
+        let root_inode = fs.root_inode().await?;
+
+        let mount = Mount {
+            fs,
+            root_inode: root_inode.clone(),
+        };
+
+        // Lock the state to add the new mount and filesystem.
+        self.state.lock_save_irq().add_mount(root_inode.id(), mount);
+
+        // Set the global root inode.
+        *self.root_inode.lock_save_irq() = Some(root_inode);
+
+        Ok(())
+    }
+
+    /// Mounts a filesystem at a given directory (mount point).
+    pub async fn mount(
+        &self,
+        mount_point: Arc<dyn Inode>,
+        driver_name: &str,
+        blkdev: Option<Box<dyn BlockDevice>>,
+    ) -> Result<()> {
+        if mount_point.getattr().await?.file_type != FileType::Directory {
+            return Err(FsError::NotADirectory.into());
+        }
+
+        let fs = self.create_fs_instance(driver_name, blkdev).await?;
+        let mount_point_id = mount_point.id();
+        let root_inode = fs.root_inode().await?;
+
+        let new_mount = Mount { fs, root_inode };
+
+        // Lock the state and insert the new mount.
+        self.state
+            .lock_save_irq()
+            .add_mount(mount_point_id, new_mount);
+
+        Ok(())
+    }
+
+    /// Resolves a path string to an Inode, starting from a given root for
+    /// relative paths.
+    pub async fn resolve_path(&self, path: &Path, root: Arc<dyn Inode>) -> Result<Arc<dyn Inode>> {
+        let mut current_inode = if path.is_absolute() {
+            self.root_inode
+                .lock_save_irq()
+                .as_ref()
+                .cloned()
+                .ok_or(FsError::NotFound)?
+        } else {
+            root
+        };
+
+        for component in path.components() {
+            // Before looking up the component, check if the current inode is a
+            // mount point. If so, traverse into the mounted filesystem's root.
+            if let Some(mount_root) = self
+                .state
+                .lock_save_irq()
+                .get_mount_root(&current_inode.id())
+            {
+                current_inode = mount_root;
+            }
+
+            // Delegate the lookup to the underlying filesystem.
+            current_inode = current_inode.lookup(component).await?;
+        }
+
+        // After the final lookup, check if the destination is itself a mount point.
+        if let Some(mount_root) = self
+            .state
+            .lock_save_irq()
+            .get_mount_root(&current_inode.id())
+        {
+            current_inode = mount_root;
+        }
+
+        Ok(current_inode)
+    }
+
+    /// Returns a clone of the root inode.
+    pub fn root_inode(&self) -> Arc<dyn Inode> {
+        self.root_inode.lock_save_irq().as_ref().unwrap().clone()
+    }
+
+    pub async fn open(
+        &self,
+        path: &Path,
+        flags: OpenFlags,
+        root: Arc<dyn Inode>,
+    ) -> Result<Arc<OpenFile>> {
+        // Attempt to resolve the full path first.
+        let resolve_result = self.resolve_path(path, root.clone()).await;
+
+        let target_inode = match resolve_result {
+            // The file/directory exists.
+            Ok(inode) => {
+                if flags.contains(OpenFlags::O_CREAT | OpenFlags::O_EXCL) {
+                    // O_CREAT and O_EXCL were passed and the file exists. This is
+                    // an error.
+                    return Err(FsError::AlreadyExists.into());
+                }
+                // The file exists, and we're not exclusively creating. Proceed.
+                inode
+            }
+
+            // The path was not found.
+            Err(KernelError::Fs(FsError::NotFound)) => {
+                // If O_CREAT is specified, we should create it.
+                if flags.contains(OpenFlags::O_CREAT) {
+                    // Resolve its parent directory.
+                    let parent_path = path.parent().ok_or(FsError::InvalidInput)?;
+                    let _file_name = path.file_name().ok_or(FsError::InvalidInput)?;
+
+                    let parent_inode = self.resolve_path(parent_path, root).await?;
+
+                    // Ensure the parent is actually a directory before creating a
+                    // file in it.
+                    if parent_inode.getattr().await?.file_type != FileType::Directory {
+                        return Err(FsError::NotADirectory.into());
+                    }
+
+                    // TODO: Check for write permissions on parent_inode before creating.
+                    // let _mode = ...; get mode from syscall arguments
+                    todo!("File creation logic");
+                } else {
+                    // O_CREAT was not specified, so NotFound is the correct error.
+                    return Err(FsError::NotFound.into());
+                }
+            }
+
+            // Some other error occurred during resolution (e.g., NotADirectory
+            // mid-path).
+            Err(e) => return Err(e),
+        };
+
+        let attr = target_inode.getattr().await?;
+
+        if flags.contains(OpenFlags::O_DIRECTORY) && attr.file_type != FileType::Directory {
+            return Err(FsError::NotADirectory.into());
+        }
+
+        if attr.file_type == FileType::Directory
+            && (flags.contains(OpenFlags::O_WRONLY) || flags.contains(OpenFlags::O_RDWR))
+        {
+            return Err(FsError::IsADirectory.into());
+        }
+
+        if flags.contains(OpenFlags::O_TRUNC)
+            && attr.file_type == FileType::File
+            && (flags.contains(OpenFlags::O_WRONLY) || flags.contains(OpenFlags::O_RDWR))
+        {
+            // TODO: Check for write permissions on the inode itself.
+            target_inode.truncate(0).await?;
+        }
+
+        match attr.file_type {
+            FileType::File => {
+                let mut open_file =
+                    OpenFile::new(Box::new(RegFile::new(target_inode.clone())), flags);
+                open_file.set_inode(target_inode);
+
+                Ok(Arc::new(open_file))
+            }
+            FileType::Directory => {
+                let mut open_file =
+                    OpenFile::new(Box::new(DirFile::new(target_inode.clone())), flags);
+                open_file.set_inode(target_inode);
+
+                Ok(Arc::new(open_file))
+            }
+            FileType::Symlink => todo!(),
+            FileType::BlockDevice(_) => todo!(),
+            FileType::CharDevice(char_dev_descriptor) => {
+                let char_driver = DM
+                    .lock_save_irq()
+                    .find_char_driver(char_dev_descriptor.major)
+                    .ok_or(FsError::NoDevice)?;
+
+                Ok(char_driver
+                    .get_device(char_dev_descriptor.minor)
+                    .ok_or(FsError::NoDevice)?
+                    .open(flags)?)
+            }
+            FileType::Fifo => todo!(),
+            FileType::Socket => todo!(),
+        }
+    }
+}
+
+pub static VFS: VFS = VFS::new();
