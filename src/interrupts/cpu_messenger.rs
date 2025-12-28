@@ -20,7 +20,6 @@ use log::{info, warn};
 
 #[derive(Clone)]
 pub enum Message {
-    Preempt,
     PutTask(Arc<Task>),
     Ping(u32),
 }
@@ -48,9 +47,6 @@ impl InterruptHandler for CpuMessenger {
             .try_pop();
 
         match message {
-            Some(Message::Preempt) => {
-                sched::sched_yield();
-            }
             Some(Message::PutTask(task)) => sched::insert_task(task),
             Some(Message::Ping(cpu_id)) => {
                 info!("CPU {} recieved ping from CPU {}", ArchImpl::id(), cpu_id)

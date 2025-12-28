@@ -1,20 +1,14 @@
+use super::Driver;
+use crate::interrupts::{InterruptDescriptor, InterruptHandler};
+use crate::per_cpu;
+use crate::sync::OnceLock;
+use alloc::{collections::binary_heap::BinaryHeap, sync::Arc};
 use core::{
     future::poll_fn,
     ops::{Add, Sub},
     task::{Poll, Waker},
     time::Duration,
 };
-
-use super::Driver;
-use crate::{
-    interrupts::{InterruptDescriptor, InterruptHandler},
-    sync::{OnceLock, SpinLock},
-};
-use alloc::{collections::binary_heap::BinaryHeap, sync::Arc};
-use log::warn;
-use libkernel::CpuOps;
-use crate::arch::ArchImpl;
-use crate::interrupts::cpu_messenger::{message_cpu, Message};
 
 pub mod armv8_arch;
 
@@ -36,7 +30,7 @@ enum WakeupKind {
     Task(Waker),
 
     /// This wake up is for the kernel's preemption mechanism.
-    Preempt(usize),
+    Preempt,
 }
 
 struct WakeupEvent {
@@ -107,14 +101,13 @@ pub trait HwTimer: Send + Sync + Driver {
     /// Return an instant that represents this instant.
     fn now(&self) -> Instant;
 
-    /// Schedules an interrupt to occur at `when`. If when is `None`, timer
-    /// interrupts should be disabled.
+    /// Schedules an interrupt to occur at `when` on *this* CPU. If when is
+    /// `None`, timer interrupts should be disabled.
     fn schedule_interrupt(&self, when: Option<Instant>);
 }
 
 pub struct SysTimer {
     start_time: Instant,
-    wakeup_q: SpinLock<BinaryHeap<WakeupEvent>>,
     driver: Arc<dyn HwTimer>,
 }
 
@@ -126,48 +119,24 @@ impl Driver for SysTimer {
 
 impl InterruptHandler for SysTimer {
     fn handle_irq(&self, _desc: InterruptDescriptor) {
-        // TODO: find a nicer way to handle events without heap-allocating or having a fixed limit.
-        let mut wake_q = self.wakeup_q.lock_save_irq();
-        let mut events = [const { None }; 16];
-        let mut handled_events = 0;
+        let mut wake_q = WAKEUP_Q.borrow_mut();
 
         while let Some(next_event) = wake_q.peek() {
             if next_event.when <= self.driver.now() {
                 let event = wake_q.pop().unwrap(); // We know it's there from peek()
 
-                events[handled_events] = Some(event);
-                handled_events += 1;
-                if handled_events == events.len() {
-                    warn!("SysTimer: Too many events to handle in one interrupt");
-                    break;
+                match event.what {
+                    WakeupKind::Task(waker) => waker.wake(),
+                    WakeupKind::Preempt => {
+                        // Do nothing, the IRQ return-to-userspace code will
+                        // call schedule() for us.
+                    }
                 }
             } else {
                 // The next event is in the future, so we're done.
                 break;
             }
         }
-
-        drop(wake_q); // Release the lock before waking tasks or sending IPIs.
-
-        for event in events {
-            let Some(event) = event else {
-                break;
-            };
-            match event.what {
-                WakeupKind::Task(waker) => waker.wake(),
-                WakeupKind::Preempt(id) => {
-                    crate::sched::sched_yield();
-                    if id != ArchImpl::id() {
-                        // Send an IPI to the target CPU to preempt it
-                        if let Err(e) = message_cpu(id, Message::Preempt) {
-                            log::warn!("Failed to send preempt IPI to CPU {}: {}", id, e);
-                        }
-                    }
-                },
-            }
-        }
-
-        let wake_q = self.wakeup_q.lock_save_irq();
 
         // Always re-arm: either next task/event, or a periodic/preemption tick.
         let next_deadline = wake_q.peek().map(|e| e.when).or_else(|| {
@@ -189,7 +158,6 @@ impl SysTimer {
     fn from_driver(driver: Arc<dyn HwTimer>) -> Self {
         Self {
             start_time: driver.now(),
-            wakeup_q: SpinLock::new(BinaryHeap::new()),
             driver,
         }
     }
@@ -198,19 +166,19 @@ impl SysTimer {
         let when = self.driver.now() + duration;
 
         poll_fn(|cx| {
-            let mut wake_q = self.wakeup_q.lock_save_irq();
-
             if self.driver.now() >= when {
                 Poll::Ready(())
             } else {
-                wake_q.push(WakeupEvent {
+                let mut wakeup_q = WAKEUP_Q.borrow_mut();
+
+                wakeup_q.push(WakeupEvent {
                     when,
                     what: WakeupKind::Task(cx.waker().clone()),
                 });
 
                 // After pushing, we must update the hardware timer in case our
                 // new event is the earliest one.
-                if let Some(next_event) = wake_q.peek() {
+                if let Some(next_event) = wakeup_q.peek() {
                     self.driver.schedule_interrupt(Some(next_event.when));
                 }
 
@@ -222,12 +190,12 @@ impl SysTimer {
 
     /// Schedule a preemption event for the current CPU.
     pub fn schedule_preempt(&self, when: Instant) {
-        let mut wake_q = self.wakeup_q.lock_save_irq();
+        let mut wake_q = WAKEUP_Q.borrow_mut();
 
         // Insert the pre-emption event.
         wake_q.push(WakeupEvent {
             when,
-            what: WakeupKind::Preempt(ArchImpl::id()),
+            what: WakeupKind::Preempt,
         });
 
         // Ensure the hardware timer is armed for the earliest event.
@@ -241,7 +209,7 @@ impl SysTimer {
     /// Secondary CPUs should call this right after they have enabled their
     /// interrupt controller so that they start receiving timer interrupts.
     pub fn kick_current_cpu(&self) {
-        let wake_q = self.wakeup_q.lock_save_irq();
+        let wake_q = WAKEUP_Q.borrow_mut();
 
         let next_deadline = wake_q.peek().map(|e| e.when).or_else(|| {
             // Fallback: re-use the same 15 ms periodic tick as the primary CPU.
@@ -298,16 +266,19 @@ pub fn schedule_preempt(when: Instant) {
 pub fn schedule_force_preempt() {
     // Schedule a preemption event if none are scheduled
     let when = now().unwrap() + Duration::from_millis(5);
-    if let Some(timer) = SYS_TIMER.get() {
-        let wake_q = timer.wakeup_q.lock_save_irq();
-        if let Some(next_event) = wake_q.peek() {
-            if next_event.when <= when {
-                // An event is already scheduled before our forced preemption
-                return;
-            }
-        }
+
+    if let Some(next_event) = WAKEUP_Q.borrow().peek()
+        && next_event.when <= when
+    {
+        // An event is already scheduled before our forced preemption
+        return;
     }
+
     schedule_preempt(when);
 }
 
 static SYS_TIMER: OnceLock<Arc<SysTimer>> = OnceLock::new();
+
+per_cpu! {
+    static WAKEUP_Q: BinaryHeap<WakeupEvent> = BinaryHeap::new;
+}
