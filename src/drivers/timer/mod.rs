@@ -11,6 +11,10 @@ use crate::{
     sync::{OnceLock, SpinLock},
 };
 use alloc::{collections::binary_heap::BinaryHeap, sync::Arc};
+use core::sync::atomic::AtomicUsize;
+use libkernel::CpuOps;
+use crate::arch::ArchImpl;
+use crate::interrupts::cpu_messenger::{message_cpu, Message};
 
 pub mod armv8_arch;
 
@@ -32,7 +36,7 @@ enum WakeupKind {
     Task(Waker),
 
     /// This wake up is for the kernel's preemption mechanism.
-    Preempt,
+    Preempt(usize),
 }
 
 struct WakeupEvent {
@@ -122,6 +126,11 @@ impl Driver for SysTimer {
 
 impl InterruptHandler for SysTimer {
     fn handle_irq(&self, _desc: InterruptDescriptor) {
+        // static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        // let count = COUNTER.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        // if count % 100 == 0 {
+        //     log::debug!("SysTimer IRQ handled {} times", count);
+        // }
         let mut wake_q = self.wakeup_q.lock_save_irq();
 
         while let Some(next_event) = wake_q.peek() {
@@ -130,7 +139,15 @@ impl InterruptHandler for SysTimer {
 
                 match event.what {
                     WakeupKind::Task(waker) => waker.wake(),
-                    WakeupKind::Preempt => crate::sched::sched_yield(),
+                    WakeupKind::Preempt(id) => {
+                        crate::sched::sched_yield();
+                        if id != ArchImpl::id() {
+                            // Send an IPI to the target CPU to preempt it
+                            if let Err(e) = message_cpu(id, Message::Preempt) {
+                                log::warn!("Failed to send preempt IPI to CPU {}: {}", id, e);
+                            }
+                        }
+                    },
                 }
             } else {
                 // The next event is in the future, so we're done.
@@ -196,7 +213,7 @@ impl SysTimer {
         // Insert the pre-emption event.
         wake_q.push(WakeupEvent {
             when,
-            what: WakeupKind::Preempt,
+            what: WakeupKind::Preempt(ArchImpl::id()),
         });
 
         // Ensure the hardware timer is armed for the earliest event.
