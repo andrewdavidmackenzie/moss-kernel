@@ -112,3 +112,49 @@ pub fn test_interruptible_read_pipe() {
     }
     println!(" OK");
 }
+
+pub fn test_interruptible_waitpid() {
+    print!("Testing interruptible waitpid ...");
+
+    register_handler(libc::SIGALRM, false);
+
+    unsafe {
+        let ppid = libc::getpid();
+        let cpid = libc::fork();
+
+        if cpid == 0 {
+            // in child.
+            let req = libc::timespec {
+                tv_sec: 1,
+                tv_nsec: 0,
+            };
+
+            libc::nanosleep(&req, ptr::null_mut());
+            libc::kill(ppid, libc::SIGALRM);
+            let req = libc::timespec {
+                tv_sec: 10,
+                tv_nsec: 0,
+            };
+            libc::nanosleep(&req, ptr::null_mut());
+            libc::exit(0);
+        };
+
+        // parent.
+        let mut status = 0;
+        let ret = libc::waitpid(cpid, &mut status, 0); // Blocking wait
+        let err = std::io::Error::last_os_error();
+
+        if ret == -1 && err.raw_os_error() == Some(libc::EINTR) {
+            // Now we must actually kill/wait the child to clean up zombies
+            libc::kill(cpid, libc::SIGKILL);
+            libc::waitpid(cpid, &mut status, 0);
+        } else {
+            panic!(
+                "waitpid returned {:?} (errno: {:?}) instead of -1/EINTR",
+                ret,
+                err.raw_os_error()
+            );
+        }
+    }
+    println!(" OK");
+}
