@@ -17,6 +17,7 @@ pub enum TaskFileType {
     Root,
     State,
     Stat,
+    Maps,
 }
 
 impl TryFrom<&str> for TaskFileType {
@@ -30,6 +31,7 @@ impl TryFrom<&str> for TaskFileType {
             "stat" => Ok(TaskFileType::Stat),
             "cwd" => Ok(TaskFileType::Cwd),
             "root" => Ok(TaskFileType::Root),
+            "maps" => Ok(TaskFileType::Maps),
             _ => Err(()),
         }
     }
@@ -52,6 +54,7 @@ impl ProcTaskFileInode {
                     TaskFileType::Status
                     | TaskFileType::Comm
                     | TaskFileType::State
+                    | TaskFileType::Maps
                     | TaskFileType::Stat => FileType::File,
                     TaskFileType::Cwd | TaskFileType::Root => FileType::Symlink,
                 },
@@ -174,6 +177,26 @@ Threads:\t{tasks}\n",
                 }
                 TaskFileType::Cwd => task.cwd.lock_save_irq().clone().1.as_str().to_string(),
                 TaskFileType::Root => task.root.lock_save_irq().1.as_str().to_string(),
+                TaskFileType::Maps => {
+                    let mut output = String::new();
+                    let mut vm = task.vm.lock_save_irq();
+
+                    for vma in vm.mm_mut().iter_vmas() {
+                        output.push_str(&format!(
+                            "{:x}-{:x} {}{}{}{} {:010x}                    {}\n",
+                            vma.region().start_address().value(),
+                            vma.region().end_address().value(),
+                            if vma.permissions().read { "r" } else { "-" },
+                            if vma.permissions().write { "w" } else { "-" },
+                            if vma.permissions().execute { "x" } else { "-" },
+                            "p", // Don't suport shared mappings... yet!
+                            vma.file_offset().unwrap_or_default(),
+                            vma.name()
+                        ));
+                    }
+
+                    output
+                }
             }
         } else {
             "State:\tGone\n".to_string()

@@ -1,6 +1,7 @@
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::{process::fd_table::Fd, sched::current::current_task};
+use alloc::string::{String, ToString};
 use libkernel::{
     error::{KernelError, Result},
     memory::{
@@ -85,8 +86,8 @@ pub async fn sys_mmap(
 
     let requested_len = len as usize;
 
-    let kind = if (flags & (MAP_ANON | MAP_ANONYMOUS)) != 0 {
-        VMAreaKind::Anon
+    let (kind, name) = if (flags & (MAP_ANON | MAP_ANONYMOUS)) != 0 {
+        (VMAreaKind::Anon, String::new())
     } else {
         // File-backed mapping: require a valid fd and use the provided offset.
         let fd = current_task()
@@ -96,8 +97,12 @@ pub async fn sys_mmap(
             .ok_or(KernelError::BadFd)?;
 
         let inode = fd.inode().ok_or(KernelError::BadFd)?;
+        let name = fd
+            .path()
+            .map(|x| x.as_str().to_string())
+            .unwrap_or_default();
 
-        VMAreaKind::new_file(inode, offset, len)
+        (VMAreaKind::new_file(inode, offset, len), name)
     };
 
     let address_request = if addr.is_null() {
@@ -125,6 +130,7 @@ pub async fn sys_mmap(
         requested_len,
         permissions,
         kind,
+        name,
     )?;
 
     Ok(new_mapping_addr.value())

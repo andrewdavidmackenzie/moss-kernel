@@ -4,6 +4,7 @@ use crate::{
     UserAddressSpace,
     error::{KernelError, Result},
 };
+use alloc::string::ToString;
 use memory_map::{AddressRequest, MemoryMap};
 use vmarea::{AccessKind, FaultValidation, VMAPermissions, VMArea, VMAreaKind};
 
@@ -137,6 +138,7 @@ impl<AS: UserAddressSpace> ProcessVM<AS> {
                 growth_size,
                 BRK_PERMISSIONS,
                 VMAreaKind::Anon,
+                "[heap]".to_string(),
             )?;
 
             self.brk = new_brk_region;
@@ -174,6 +176,7 @@ mod tests {
             region: VirtMemoryRegion::new(VA::from_value(0x1000), PAGE_SIZE),
             kind: VMAreaKind::Anon, // Simplification for test
             permissions: VMAPermissions::rx(),
+            name: String::new(),
         };
 
         ProcessVM::from_vma(text_vma).unwrap()
@@ -329,6 +332,7 @@ mod tests {
             region: VirtMemoryRegion::new(obstacle_addr, PAGE_SIZE),
             kind: VMAreaKind::Anon,
             permissions: VMAPermissions::ro(),
+            name: String::new(),
         };
         vm.mm.insert_and_merge(obstacle_vma);
         assert_eq!(vm.mm.vma_count(), 2);

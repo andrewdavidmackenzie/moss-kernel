@@ -12,9 +12,10 @@
 use core::cmp;
 
 use crate::{
-    fs::Inode,
+    fs::{Inode, InodeId},
     memory::{PAGE_MASK, PAGE_SIZE, address::VA, region::VirtMemoryRegion},
 };
+use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use object::{
     Endian,
@@ -173,6 +174,7 @@ impl VMAreaKind {
 #[derive(Clone, PartialEq)]
 pub struct VMArea {
     pub region: VirtMemoryRegion,
+    pub(super) name: String,
     pub(super) kind: VMAreaKind,
     pub(super) permissions: VMAPermissions,
 }
@@ -189,7 +191,12 @@ impl VMArea {
             region,
             kind,
             permissions,
+            name: String::new(),
         }
+    }
+
+    pub fn set_name<S: AsRef<str>>(&mut self, s: S) {
+        self.name = s.as_ref().to_string();
     }
 
     /// Creates a file-backed `VMArea` directly from an ELF program header.
@@ -246,6 +253,7 @@ impl VMArea {
                 len: hdr.p_filesz(endian) + mappable_region.offset() as u64,
             }),
             permissions,
+            name: String::new(),
         }
     }
 
@@ -454,6 +462,24 @@ impl VMArea {
     /// Return the virtual memory region managed by this VMA.
     pub fn region(&self) -> VirtMemoryRegion {
         self.region
+    }
+
+    pub fn file_offset(&self) -> Option<u64> {
+        match self.kind {
+            VMAreaKind::File(ref vmfile_mapping) => Some(vmfile_mapping.offset()),
+            VMAreaKind::Anon => None,
+        }
+    }
+
+    pub fn inode_id(&self) -> Option<InodeId> {
+        match self.kind {
+            VMAreaKind::File(ref vmfile_mapping) => Some(vmfile_mapping.file().id()),
+            VMAreaKind::Anon => None,
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
     }
 }
 

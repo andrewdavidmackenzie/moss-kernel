@@ -7,7 +7,7 @@ use crate::{
         region::VirtMemoryRegion,
     },
 };
-use alloc::{collections::BTreeMap, vec::Vec};
+use alloc::{collections::BTreeMap, string::String, vec::Vec};
 
 const MMAP_BASE: usize = 0x4000_0000_0000;
 
@@ -85,6 +85,7 @@ impl<AS: UserAddressSpace> MemoryMap<AS> {
         mut len: usize,
         perms: VMAPermissions,
         kind: VMAreaKind,
+        name: String,
     ) -> Result<VA> {
         if len == 0 {
             return Err(KernelError::InvalidValue);
@@ -133,7 +134,9 @@ impl<AS: UserAddressSpace> MemoryMap<AS> {
 
         // At this point, `start_addr` points to a valid, free region.
         // We can now create and insert the new VMA, handling merges.
-        let new_vma = VMArea::new(region, kind, perms);
+        let mut new_vma = VMArea::new(region, kind, perms);
+
+        new_vma.set_name(name);
 
         self.insert_and_merge(new_vma);
 
@@ -501,6 +504,10 @@ impl<AS: UserAddressSpace> MemoryMap<AS> {
 
     pub fn vma_count(&self) -> usize {
         self.vmas.len()
+    }
+
+    pub fn iter_vmas(&self) -> impl Iterator<Item = &VMArea> {
+        self.vmas.values()
     }
 }
 

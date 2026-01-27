@@ -59,19 +59,22 @@ fn process_prog_headers<E: Endian>(
     vmas: &mut Vec<VMArea>,
     bias: Option<usize>,
     elf_file: Arc<dyn Inode>,
+    path: &Path,
     endian: E,
 ) -> Option<VA> {
     let mut hdr_addr = None;
 
     for hdr in hdrs {
         if hdr.p_type(endian) == PT_LOAD {
-            let vma = VMArea::from_pheader(elf_file.clone(), *hdr, endian, bias);
+            let mut vma = VMArea::from_pheader(elf_file.clone(), *hdr, endian, bias);
 
             // Find PHDR: Assumption segment with p_offset == 0 contains
             // headers.
             if hdr.p_offset.get(endian) == 0 {
                 hdr_addr = Some(vma.region().start_address());
             }
+
+            vma.set_name(path.as_str());
 
             vmas.push(vma);
         }
@@ -80,7 +83,12 @@ fn process_prog_headers<E: Endian>(
     hdr_addr
 }
 
-async fn exec_elf(inode: Arc<dyn Inode>, argv: Vec<String>, envp: Vec<String>) -> Result<()> {
+async fn exec_elf(
+    inode: Arc<dyn Inode>,
+    path: &Path,
+    argv: Vec<String>,
+    envp: Vec<String>,
+) -> Result<()> {
     // Read ELF header
     let mut buf = [0u8; core::mem::size_of::<elf::FileHeader64<LittleEndian>>()];
     inode.read_at(0, &mut buf).await?;
@@ -137,7 +145,8 @@ async fn exec_elf(inode: Arc<dyn Inode>, argv: Vec<String>, envp: Vec<String>) -
     let mut vmas = Vec::new();
 
     // Process the binary program headers.
-    if let Some(hdr_addr) = process_prog_headers(hdrs, &mut vmas, main_bias, inode.clone(), endian)
+    if let Some(hdr_addr) =
+        process_prog_headers(hdrs, &mut vmas, main_bias, inode.clone(), path, endian)
     {
         auxv.push(AT_PHDR);
         auxv.push(hdr_addr.add_bytes(elf.e_phoff(endian) as _).value() as _);
@@ -160,11 +169,15 @@ async fn exec_elf(inode: Arc<dyn Inode>, argv: Vec<String>, envp: Vec<String>) -
         main_entry
     };
 
-    vmas.push(VMArea::new(
+    let mut stack_vma = VMArea::new(
         VirtMemoryRegion::new(VA::from_value(STACK_START), STACK_SZ),
         VMAreaKind::Anon,
         VMAPermissions::rw(),
-    ));
+    );
+
+    stack_vma.set_name("[stack]");
+
+    vmas.push(stack_vma);
 
     let mut mem_map = MemoryMap::from_vmas(vmas)?;
     let stack_ptr = setup_user_stack(&mut mem_map, &argv, &envp, auxv)?;
@@ -231,12 +244,13 @@ async fn exec_script(
     new_argv.push(path.as_str().to_string());
     new_argv.extend(argv.into_iter().skip(1)); // Skip original argv[0]
     // Resolve interpreter inode
+    let interp_path = Path::new(interp_path);
     let task = current_task_shared();
     let interp_inode = VFS
-        .resolve_path(Path::new(interp_path), VFS.root_inode(), &task)
+        .resolve_path(interp_path, VFS.root_inode(), &task)
         .await?;
     // Execute interpreter
-    exec_elf(interp_inode, new_argv, envp).await?;
+    exec_elf(interp_inode, interp_path, new_argv, envp).await?;
     Ok(())
 }
 
@@ -249,7 +263,7 @@ pub async fn kernel_exec(
     let mut buf = [0u8; 4];
     inode.read_at(0, &mut buf).await?;
     if buf == [0x7F, b'E', b'L', b'F'] {
-        exec_elf(inode, argv, envp).await
+        exec_elf(inode, path, argv, envp).await
     } else if buf.starts_with(b"#!") {
         exec_script(path, inode, argv, envp).await
     } else {
@@ -394,7 +408,14 @@ async fn process_interp(interp_path: String, vmas: &mut Vec<VMArea>) -> Result<V
         .map_err(|_| ExecError::InvalidPHdrFormat)?;
 
     // Build VMAs for interpreter
-    process_prog_headers(interp_hdrs, vmas, Some(LINKER_BIAS), interp_inode, iendian);
+    process_prog_headers(
+        interp_hdrs,
+        vmas,
+        Some(LINKER_BIAS),
+        interp_inode,
+        path,
+        iendian,
+    );
 
     let interp_entry = VA::from_value(LINKER_BIAS + interp_elf.e_entry(iendian) as usize);
 
