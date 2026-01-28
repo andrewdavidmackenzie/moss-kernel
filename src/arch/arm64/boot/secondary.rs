@@ -6,6 +6,7 @@ use crate::{
                 arch_init_secondary,
                 memory::{KERNEL_STACK_PG_ORDER, allocate_kstack_region},
             },
+            memory::flush_to_ram,
             psci::{PSCIEntry, PSCIMethod, boot_secondary_psci},
         },
     },
@@ -122,7 +123,9 @@ fn prepare_for_secondary_entry() -> Result<(PA, PA)> {
     )?;
 
     unsafe {
-        (&raw mut SECONDARY_BOOT_CTX as *mut SecondaryBootInfo).write(SecondaryBootInfo {
+        let boot_ctx = &raw mut SECONDARY_BOOT_CTX as *mut SecondaryBootInfo;
+
+        boot_ctx.write(SecondaryBootInfo {
             boot_stack_addr: boot_stack,
             kstack_addr: kstack_vaddr.end_address(),
             kmem_ttbr: ArchImpl::kern_address_space().lock_save_irq().table_pa(),
@@ -132,6 +135,11 @@ fn prepare_for_secondary_entry() -> Result<(PA, PA)> {
             start_fn: VA::from_value(arch_init_secondary as *const () as usize),
             exception_ret: VA::from_value(&exception_return as *const _ as usize),
         });
+
+        // Flush the cache to SRAM. Since the secondary will start without the
+        // MMU enabled (and therefore caches), we can't reply on the CCI.
+        // Therefore, manually flush the boot context to RAM.
+        flush_to_ram(boot_ctx);
     };
 
     Ok((entry_fn, ctx))
