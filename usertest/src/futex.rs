@@ -42,7 +42,7 @@ fn test_futex() {
     }
 }
 
-register_test!(test_futex, "Testing futex");
+register_test!(test_futex);
 
 fn test_futex_bitset() {
     // Wait on bit 1, Wake on bit 1
@@ -214,4 +214,4 @@ fn test_futex_bitset() {
     }
 }
 
-register_test!(test_futex_bitset, "Testing futex bitset");
+register_test!(test_futex_bitset);

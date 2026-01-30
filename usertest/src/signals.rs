@@ -72,10 +72,7 @@ fn test_interruptible_nanosleep() {
     }
 }
 
-register_test!(
-    test_interruptible_nanosleep,
-    "Testing interruptible nanosleep"
-);
+register_test!(test_interruptible_nanosleep);
 
 fn test_interruptible_read_pipe() {
     register_handler(libc::SIGALRM, false);
@@ -114,10 +111,7 @@ fn test_interruptible_read_pipe() {
     }
 }
 
-register_test!(
-    test_interruptible_read_pipe,
-    "Testing interruptible read (pipe)"
-);
+register_test!(test_interruptible_read_pipe);
 
 fn test_interruptible_waitpid() {
     register_handler(libc::SIGALRM, false);
@@ -162,4 +156,4 @@ fn test_interruptible_waitpid() {
     }
 }
 
-register_test!(test_interruptible_waitpid, "Testing interruptible waitpid");
+register_test!(test_interruptible_waitpid);

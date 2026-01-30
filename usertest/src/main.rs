@@ -21,7 +21,7 @@ macro_rules! register_test {
         // Add to inventory
         inventory::submit! {
             crate::Test {
-                test_text: stringify!($name),
+                test_text: concat!(module_path!(), "::", stringify!($name)),
                 test_fn: $name,
             }
         }
@@ -43,7 +43,7 @@ fn test_sync() {
     }
 }
 
-register_test!(test_sync, "Testing sync syscall");
+register_test!(test_sync);
 
 fn test_clock_sleep() {
     use std::thread::sleep;
@@ -56,7 +56,7 @@ fn test_clock_sleep() {
     assert!(now.elapsed() >= SLEEP_LEN);
 }
 
-register_test!(test_clock_sleep, "Testing clock sleep");
+register_test!(test_clock_sleep);
 
 fn test_fork() {
     unsafe {
@@ -74,7 +74,7 @@ fn test_fork() {
     }
 }
 
-register_test!(test_fork, "Testing fork syscall");
+register_test!(test_fork);
 
 fn test_rust_thread() {
     let handle = thread::spawn(|| 24);
@@ -82,7 +82,7 @@ fn test_rust_thread() {
     assert_eq!(handle.join().unwrap(), 24);
 }
 
-register_test!(test_rust_thread, "Testing rust threads");
+register_test!(test_rust_thread);
 
 fn test_rust_mutex() {
     const THREADS: usize = 32;
@@ -116,7 +116,7 @@ fn test_rust_mutex() {
     assert_eq!(final_val, THREADS * ITERS);
 }
 
-register_test!(test_rust_mutex, "Testing rust mutex");
+register_test!(test_rust_mutex);
 
 fn test_parking_lot_mutex_timeout() {
     use parking_lot::Mutex;
@@ -134,10 +134,7 @@ fn test_parking_lot_mutex_timeout() {
     drop(guard);
 }
 
-register_test!(
-    test_parking_lot_mutex_timeout,
-    "Testing parking_lot mutex with timeout"
-);
+register_test!(test_parking_lot_mutex_timeout);
 
 fn test_thread_with_name() {
     let handle = thread::Builder::new()
@@ -150,7 +147,7 @@ fn test_thread_with_name() {
     handle.join().unwrap();
 }
 
-register_test!(test_thread_with_name, "Testing thread with name");
+register_test!(test_thread_with_name);
 
 fn test_mincore() {
     use std::ptr;
@@ -194,7 +191,7 @@ fn test_mincore() {
     }
 }
 
-register_test!(test_mincore, "Testing mincore syscall");
+register_test!(test_mincore);
 
 fn run_test(test_fn: fn()) {
     // Fork a new process to run the test
@@ -211,10 +208,7 @@ fn run_test(test_fn: fn()) {
             let mut status = 0;
             libc::waitpid(pid, &mut status, 0);
             if !libc::WIFEXITED(status) || libc::WEXITSTATUS(status) != 0 {
-                panic!(
-                    "Test failed in child process: {} (this might be incorrect)",
-                    std::io::Error::last_os_error()
-                );
+                panic!("Test failed in child process with status {status}");
             }
         }
     }
@@ -225,7 +219,7 @@ fn main() {
     let start = std::time::Instant::now();
     for test in inventory::iter::<Test> {
         print!("{} ...", test.test_text);
-        stdout().flush();
+        let _ = stdout().flush();
         run_test(test.test_fn);
         println!(" OK");
     }

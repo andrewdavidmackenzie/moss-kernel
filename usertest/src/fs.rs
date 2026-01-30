@@ -14,7 +14,7 @@ fn test_opendir() {
     }
 }
 
-register_test!(test_opendir, "Testing opendir syscall");
+register_test!(test_opendir);
 
 fn test_readdir() {
     let path = CString::new("/").unwrap();
@@ -38,7 +38,7 @@ fn test_readdir() {
     }
 }
 
-register_test!(test_readdir, "Testing readdir syscall");
+register_test!(test_readdir);
 
 fn test_chdir() {
     let path = CString::new("/dev").unwrap();
@@ -61,7 +61,7 @@ fn test_chdir() {
     }
 }
 
-register_test!(test_chdir, "Testing chdir syscall");
+register_test!(test_chdir);
 
 fn test_fchdir() {
     let path = CString::new("/dev").unwrap();
@@ -89,7 +89,7 @@ fn test_fchdir() {
     }
 }
 
-register_test!(test_fchdir, "Testing fchdir syscall");
+register_test!(test_fchdir);
 
 fn test_chroot() {
     let file = "/bin/busybox";
@@ -107,7 +107,7 @@ fn test_chroot() {
     }
 }
 
-register_test!(test_chroot, "Testing chroot syscall");
+register_test!(test_chroot);
 
 fn test_chmod() {
     let dir_path = "/tmp/chmod_test";
@@ -131,7 +131,7 @@ fn test_chmod() {
     fs::remove_dir(dir_path).expect("Failed to delete directory");
 }
 
-register_test!(test_chmod, "Testing chmod syscall");
+register_test!(test_chmod);
 
 fn test_fchmod() {
     let dir_path = "/tmp/fchmod_test";
@@ -160,7 +160,7 @@ fn test_fchmod() {
     fs::remove_dir(dir_path).expect("Failed to delete directory");
 }
 
-register_test!(test_fchmod, "Testing fchmod syscall");
+register_test!(test_fchmod);
 
 fn test_chown() {
     let dir_path = "/tmp/chown_test";
@@ -184,7 +184,7 @@ fn test_chown() {
     fs::remove_dir(dir_path).expect("Failed to delete directory");
 }
 
-register_test!(test_chown, "Testing chown syscall");
+register_test!(test_chown);
 
 fn test_fchown() {
     let dir_path = "/tmp/fchown_test";
@@ -213,7 +213,7 @@ fn test_fchown() {
     fs::remove_dir(dir_path).expect("Failed to delete directory");
 }
 
-register_test!(test_fchown, "Testing fchown syscall");
+register_test!(test_fchown);
 
 fn test_read() {
     let file = "/dev/zero";
@@ -233,7 +233,7 @@ fn test_read() {
     }
 }
 
-register_test!(test_read, "Testing read syscall");
+register_test!(test_read);
 
 fn test_write() {
     let file = "/dev/null";
@@ -252,7 +252,7 @@ fn test_write() {
     }
 }
 
-register_test!(test_write, "Testing write syscall");
+register_test!(test_write);
 
 fn test_link() {
     let path = "/tmp/link_test";
@@ -289,7 +289,7 @@ fn test_link() {
     fs::remove_file(link).expect("Failed to delete link");
 }
 
-register_test!(test_link, "Testing link syscall");
+register_test!(test_link);
 
 fn test_symlink() {
     use std::fs::{self, File};
@@ -330,7 +330,7 @@ fn test_symlink() {
     fs::remove_file(link).expect("Failed to delete link");
 }
 
-register_test!(test_symlink, "Testing symlink syscall");
+register_test!(test_symlink);
 
 fn test_rename() {
     use std::fs::{self, File};
@@ -366,7 +366,7 @@ fn test_rename() {
     fs::remove_file(new_path).expect("Failed to delete file");
 }
 
-register_test!(test_rename, "Testing rename syscall");
+register_test!(test_rename);
 
 fn test_truncate() {
     use std::fs::{self, File};
@@ -392,7 +392,7 @@ fn test_truncate() {
     fs::remove_file(path).expect("Failed to delete file");
 }
 
-register_test!(test_truncate, "Testing truncate syscall");
+register_test!(test_truncate);
 
 fn test_ftruncate() {
     let file = "/tmp/ftruncate_test.txt";
@@ -423,7 +423,7 @@ fn test_ftruncate() {
     fs::remove_file(file).expect("Failed to delete file");
 }
 
-register_test!(test_ftruncate, "Testing ftruncate syscall");
+register_test!(test_ftruncate);
 
 fn test_utimens() {
     let file = "/tmp/utimens_test";
@@ -481,7 +481,7 @@ fn test_utimens() {
     fs::remove_file(file).expect("Failed to delete file");
 }
 
-register_test!(test_utimens, "Testing utimens syscall");
+register_test!(test_utimens);
 
 fn test_statx() {
     #[repr(C)]
@@ -568,7 +568,7 @@ fn test_statx() {
     fs::remove_file(file).expect("Failed to delete file");
 }
 
-register_test!(test_statx, "Testing statx syscall");
+register_test!(test_statx);
 
 fn test_rust_file() {
     use std::fs::{self, File};
@@ -590,7 +590,7 @@ fn test_rust_file() {
     fs::remove_file(path).expect("Failed to delete file");
 }
 
-register_test!(test_rust_file, "Testing rust file operations");
+register_test!(test_rust_file);
 
 fn test_rust_dir() {
     use std::fs;
@@ -602,4 +602,4 @@ fn test_rust_dir() {
     fs::remove_dir(dir_path).expect("Failed to delete directory");
 }
 
-register_test!(test_rust_dir, "Testing rust directory operations");
+register_test!(test_rust_dir);
