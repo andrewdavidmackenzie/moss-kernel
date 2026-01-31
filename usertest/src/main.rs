@@ -1,9 +1,9 @@
+use colored::Colorize;
 use std::{
     io::{Write, stdout},
     sync::{Arc, Barrier, Mutex},
     thread,
 };
-use colored::Colorize;
 
 mod fs;
 mod futex;
@@ -21,7 +21,7 @@ macro_rules! register_test {
     ($name:ident) => {
         // Add to inventory
         inventory::submit! {
-            crate::Test {
+            $crate::Test {
                 test_text: concat!(module_path!(), "::", stringify!($name)),
                 test_fn: $name,
             }
@@ -30,7 +30,7 @@ macro_rules! register_test {
     ($name:ident, $text:expr) => {
         // Add to inventory
         inventory::submit! {
-            crate::Test {
+            $crate::Test {
                 test_text: $text,
                 test_fn: $name,
             }
@@ -246,7 +246,10 @@ fn main() {
     }
     let end = std::time::Instant::now();
     if failures > 0 {
-        eprintln!("{failures} tests failed in {} ms", (end - start).as_millis());
+        eprintln!(
+            "{failures} tests failed in {} ms",
+            (end - start).as_millis()
+        );
         std::process::exit(1);
     }
     println!("All tests passed in {} ms", (end - start).as_millis());
