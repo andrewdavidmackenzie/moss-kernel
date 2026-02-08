@@ -136,7 +136,7 @@ static SYSFS_INSTANCE: OnceLock<Arc<CgroupFs>> = OnceLock::new();
 pub fn cgroupfs() -> Arc<CgroupFs> {
     SYSFS_INSTANCE
         .get_or_init(|| {
-            log::info!("sysfs initialized");
+            log::info!("cgroupfs initialized");
             CgroupFs::new()
         })
         .clone()
