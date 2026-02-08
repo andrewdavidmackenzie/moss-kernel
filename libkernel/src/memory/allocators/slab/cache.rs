@@ -1,4 +1,7 @@
-use super::{alloc_order, allocator::SlabManager};
+use super::{
+    alloc_order,
+    allocator::{SlabAllocator, SlabManager},
+};
 use crate::{
     CpuOps,
     memory::{
@@ -134,5 +137,19 @@ impl SlabCache {
     /// Helper to get the specific cache for a size index
     pub fn get_cache(&mut self, layout: core::alloc::Layout) -> Option<&mut PtrCache> {
         Some(&mut self.caches[alloc_order(layout)?])
+    }
+
+    /// Flush all cache lines back into the slab allocator.
+    pub fn purge_into<CPU: CpuOps, A: PageAllocGetter<CPU>, T: AddressTranslator<()>>(
+        &mut self,
+        slab_alloc: &SlabAllocator<CPU, A, T>,
+    ) {
+        for (line, slab) in self.caches.iter_mut().zip(slab_alloc.managers.iter()) {
+            let mut slab = slab.lock_save_irq();
+            for i in 0..line.next_free {
+                slab.free(line.ptrs[i]);
+            }
+            line.next_free = 0;
+        }
     }
 }

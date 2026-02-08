@@ -2,7 +2,7 @@ use super::{
     exceptions::{ExceptionState, secondary_exceptions_init},
     memory::{
         fixmap::FIXMAPS,
-        heap::{KHeap, SLAB_ALLOC},
+        heap::{KernelHeap, SLAB_ALLOC},
         mmu::setup_kern_addr_space,
     },
     proc::vdso::vdso_init,
@@ -118,7 +118,7 @@ fn arch_init_stage2(frame: *mut ExceptionState) -> *mut ExceptionState {
         panic!("Cannot setup slab allocator");
     }
 
-    KHeap::init_for_this_cpu();
+    KernelHeap::init_for_this_cpu();
 
     // Don't trap wfi/wfe in el0.
     SCTLR_EL1.modify(SCTLR_EL1::NTWE::DontTrap + SCTLR_EL1::NTWI::DontTrap);
@@ -156,7 +156,7 @@ fn arch_init_secondary(ctx_frame: *mut ExceptionState) -> *mut ExceptionState {
     SCTLR_EL1.modify(SCTLR_EL1::NTWE::DontTrap + SCTLR_EL1::NTWI::DontTrap);
 
     // Setup heap per-cpu data.
-    KHeap::init_for_this_cpu();
+    KernelHeap::init_for_this_cpu();
 
     // Enable interrupts and exceptions.
     secondary_exceptions_init();

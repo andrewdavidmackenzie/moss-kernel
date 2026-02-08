@@ -57,9 +57,9 @@ const MAX_FREE_SLABS: usize = 32;
 /// "owns" the frame. Ownership is eventually returned to the FA via
 /// [FrameAllocatorInner::free_slab].
 pub struct SlabManager<CPU: CpuOps, A: PageAllocGetter<CPU>, T: AddressTranslator<()>> {
-    free: LinkedList<FrameAdapter>,
-    partial: LinkedList<FrameAdapter>,
-    free_list_sz: usize,
+    pub(super) free: LinkedList<FrameAdapter>,
+    pub(super) partial: LinkedList<FrameAdapter>,
+    pub(super) free_list_sz: usize,
     obj_shift: usize,
     frame_list: FrameList,
     phantom1: PhantomData<A>,
@@ -248,7 +248,8 @@ impl<CPU: CpuOps, A: PageAllocGetter<CPU>, T: AddressTranslator<()>> SlabManager
 }
 
 pub struct SlabAllocator<CPU: CpuOps, A: PageAllocGetter<CPU>, T: AddressTranslator<()>> {
-    managers: [SpinLockIrq<SlabManager<CPU, A, T>, CPU>; SLAB_MAX_OBJ_SHIFT as usize + 1],
+    pub(super) managers:
+        [SpinLockIrq<SlabManager<CPU, A, T>, CPU>; SLAB_MAX_OBJ_SHIFT as usize + 1],
 }
 
 unsafe impl<CPU: CpuOps, A: PageAllocGetter<CPU>, T: AddressTranslator<()>> Send

@@ -1,38 +1,40 @@
+use crate::{
+    arch::ArchImpl,
+    memory::{PageOffsetTranslator, page::PgAllocGetter},
+    sync::OnceLock,
+};
 use core::{
-    alloc::GlobalAlloc,
     arch::asm,
     ops::{Deref, DerefMut},
     ptr,
 };
-
-use crate::{
-    arch::ArchImpl,
-    memory::{
-        PAGE_ALLOC, PageOffsetTranslator,
-        page::{ClaimedPage, PgAllocGetter},
-    },
-    sync::OnceLock,
-};
 use libkernel::{
     CpuOps,
-    memory::{
-        PAGE_SIZE,
-        address::VA,
-        allocators::slab::{allocator::SlabAllocator, cache::SlabCache},
-        region::PhysMemoryRegion,
+    memory::allocators::slab::{
+        allocator::SlabAllocator,
+        cache::SlabCache,
+        heap::{KHeap, SlabCacheStorage, SlabGetter},
     },
 };
 
-pub static SLAB_ALLOC: OnceLock<SlabAllocator<ArchImpl, PgAllocGetter, PageOffsetTranslator>> =
-    OnceLock::new();
+type SlabAlloc = SlabAllocator<ArchImpl, PgAllocGetter, PageOffsetTranslator>;
 
-struct PerCpuCache {
-    ptr: *mut SlabCache,
+pub static SLAB_ALLOC: OnceLock<SlabAlloc> = OnceLock::new();
+
+pub struct StaticSlabGetter {}
+
+impl SlabGetter<ArchImpl, PgAllocGetter, PageOffsetTranslator> for StaticSlabGetter {
+    fn global_slab_alloc() -> &'static SlabAlloc {
+        SLAB_ALLOC.get().unwrap()
+    }
+}
+
+pub struct PerCpuCache {
     flags: usize,
 }
 
 impl PerCpuCache {
-    fn get() -> Self {
+    fn get_ptr() -> *mut SlabCache {
         let mut cache: *mut SlabCache = ptr::null_mut();
 
         unsafe { asm!("mrs {}, TPIDR_EL1", out(reg) cache, options(nostack, nomem)) };
@@ -41,9 +43,22 @@ impl PerCpuCache {
             panic!("Attempted to use alloc/free before CPU initalisation!");
         }
 
+        cache
+    }
+}
+
+impl SlabCacheStorage for PerCpuCache {
+    fn store(ptr: *mut SlabCache) {
+        #[allow(clippy::pointers_in_nomem_asm_block)]
+        unsafe {
+            asm!("msr TPIDR_EL1, {}", in(reg) ptr, options(nostack, nomem));
+        };
+    }
+
+    fn get() -> impl DerefMut<Target = SlabCache> {
         let flags = ArchImpl::disable_interrupts();
 
-        Self { ptr: cache, flags }
+        Self { flags }
     }
 }
 
@@ -54,7 +69,7 @@ impl Deref for PerCpuCache {
         // SAFETY: The pointer uses a CPU-banked register for access. We've
         // disabled interrupts so we know we cannot be preempted, therefore
         // mutable access to the cache is safe.
-        unsafe { &(*self.ptr) }
+        unsafe { &(*Self::get_ptr()) }
     }
 }
 
@@ -63,7 +78,7 @@ impl DerefMut for PerCpuCache {
         // SAFETY: The pointer uses a CPU-banked register for access. We've
         // disabled interrupts so we know we cannot be preempted, therefore
         // mutable access to the cache is safe.
-        unsafe { &mut (*self.ptr) }
+        unsafe { &mut (*Self::get_ptr()) }
     }
 }
 
@@ -73,112 +88,8 @@ impl Drop for PerCpuCache {
     }
 }
 
-pub struct KHeap {}
-
-impl KHeap {
-    /// Calculates the Frame Allocator order required for a large allocation.
-    fn calculate_huge_order(layout: core::alloc::Layout) -> usize {
-        // Ensure we cover the size, rounding UP to the nearest page.
-        let size = core::cmp::max(layout.size(), layout.align());
-        let pages_needed = size.div_ceil(PAGE_SIZE);
-        pages_needed.next_power_of_two().ilog2() as usize
-    }
-
-    pub fn init_for_this_cpu() {
-        let page = ClaimedPage::alloc_zeroed().expect("Cannot allocate heap page");
-
-        // SAFETY: We just successfully allocated the above page and the
-        // lifetime of the returned pointer will be for the entire lifetime of
-        // the kernel ('sttaic).
-        let slab_cache = unsafe { SlabCache::from_page(page) };
-
-        // Store the slab_cache pointer in the CPU-banked register `TPIDR_EL1`.
-        #[allow(clippy::pointers_in_nomem_asm_block)]
-        unsafe {
-            asm!("msr TPIDR_EL1, {}", in(reg) slab_cache, options(nostack, nomem));
-        }
-    }
-}
-
-unsafe impl GlobalAlloc for KHeap {
-    unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
-        let mut cache = PerCpuCache::get();
-
-        let Some(cache_line) = cache.get_cache(layout) else {
-            // Allocation is too big for SLAB. Defer to using the frame
-            // allocator directly.
-            return PAGE_ALLOC
-                .get()
-                .unwrap()
-                .alloc_frames(Self::calculate_huge_order(layout) as _)
-                .unwrap()
-                .leak()
-                .start_address()
-                .to_va::<PageOffsetTranslator>()
-                .cast::<u8>()
-                .as_ptr_mut();
-        };
-
-        if let Some(ptr) = cache_line.alloc() {
-            // Fast path, cache-hit.
-            return ptr;
-        }
-
-        // Fall back to the slab allocator.
-        let mut slab = SLAB_ALLOC
-            .get()
-            .expect("Slab alocator not initalised")
-            .allocator_for_layout(layout)
-            .unwrap()
-            .lock_save_irq();
-
-        let ptr = slab.alloc();
-
-        // Fill up our cache with objects from the (maybe freshly allocated)
-        // slab.
-        cache_line.fill_from(&mut slab);
-
-        ptr
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: core::alloc::Layout) {
-        let mut cache = PerCpuCache::get();
-
-        let Some(cache_line) = cache.get_cache(layout) else {
-            // If the allocation didn't fit in the slab, we must have used the
-            // FA directly.
-            let allocated_region = PhysMemoryRegion::new(
-                VA::from_ptr_mut(ptr as _).to_pa::<PageOffsetTranslator>(),
-                PAGE_SIZE << Self::calculate_huge_order(layout),
-            );
-
-            unsafe {
-                PAGE_ALLOC
-                    .get()
-                    .unwrap()
-                    .alloc_from_region(allocated_region);
-            }
-
-            return;
-        };
-
-        if cache_line.free(ptr).is_ok() {
-            return;
-        }
-
-        // The cache is full. Return some memory back to the slab allocator.
-        let mut slab = SLAB_ALLOC
-            .get()
-            .expect("Slab alocator not initalised")
-            .allocator_for_layout(layout)
-            .unwrap()
-            .lock_save_irq();
-
-        slab.free(ptr);
-
-        cache_line.drain_into(&mut slab);
-    }
-}
+pub type KernelHeap =
+    KHeap<ArchImpl, PerCpuCache, PgAllocGetter, PageOffsetTranslator, StaticSlabGetter>;
 
 #[global_allocator]
-static K_HEAP: KHeap = KHeap {};
+static K_HEAP: KernelHeap = KernelHeap::new();

@@ -7,6 +7,7 @@ const SLAB_MAX_OBJ_SHIFT: u32 = SLAB_SIZE_BYTES.ilog2() - 1;
 
 pub mod allocator;
 pub mod cache;
+pub mod heap;
 #[allow(clippy::module_inception)]
 pub(super) mod slab;
 
