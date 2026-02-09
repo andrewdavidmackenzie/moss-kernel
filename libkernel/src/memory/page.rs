@@ -1,5 +1,8 @@
 use super::{
-    PAGE_SHIFT, address::AddressTranslator, page_alloc::PageAllocGetter, region::PhysMemoryRegion,
+    PAGE_SHIFT,
+    address::AddressTranslator,
+    allocators::phys::{PageAllocGetter, PageAllocation},
+    region::PhysMemoryRegion,
 };
 use crate::{
     CpuOps,
@@ -7,7 +10,6 @@ use crate::{
     memory::{
         PAGE_SIZE,
         address::{PA, VA},
-        page_alloc::PageAllocation,
     },
 };
 use alloc::slice;
@@ -47,6 +49,11 @@ impl PageFrame {
             n: self.n ^ (1 << order),
         }
     }
+
+    #[must_use]
+    pub fn add_pages(self, n: usize) -> Self {
+        Self { n: self.n + n }
+    }
 }
 
 /// A convenience wrapper for dealing with single-page allocations.
@@ -66,7 +73,7 @@ impl<A: CpuOps, G: PageAllocGetter<A>, T: AddressTranslator<()>> ClaimedPage<A, 
     /// Allocates a single physical page. The contents of the page are
     /// undefined.
     fn alloc() -> Result<Self> {
-        let frame = G::global_page_alloc().get().unwrap().alloc_frames(0)?;
+        let frame = G::global_page_alloc().alloc_frames(0)?;
         Ok(Self(frame, PhantomData, PhantomData))
     }
 
@@ -85,12 +92,7 @@ impl<A: CpuOps, G: PageAllocGetter<A>, T: AddressTranslator<()>> ClaimedPage<A, 
     /// the page may be freed when it's owned by another context.
     pub unsafe fn from_pfn(pfn: PageFrame) -> Self {
         Self(
-            unsafe {
-                G::global_page_alloc()
-                    .get()
-                    .unwrap()
-                    .alloc_from_region(pfn.as_phys_range())
-            },
+            unsafe { G::global_page_alloc().alloc_from_region(pfn.as_phys_range()) },
             PhantomData,
             PhantomData,
         )

@@ -1,81 +1,58 @@
 use crate::{
     CpuOps,
     error::{KernelError, Result},
-    memory::{PAGE_SHIFT, address::AddressTranslator, page::PageFrame, smalloc::Smalloc},
-    sync::{once_lock::OnceLock, spinlock::SpinLockIrq},
+    memory::{
+        PAGE_SHIFT,
+        address::AddressTranslator,
+        allocators::{
+            frame::FrameState,
+            slab::{SLAB_FRAME_ALLOC_ORDER, SLAB_SIZE_BYTES},
+        },
+        page::PageFrame,
+        region::PhysMemoryRegion,
+    },
+    sync::spinlock::SpinLockIrq,
 };
 use core::{
     cmp::min,
     mem::{MaybeUninit, size_of, transmute},
 };
-use intrusive_collections::{LinkedList, LinkedListLink, UnsafeRef, intrusive_adapter};
+use intrusive_collections::{LinkedList, UnsafeRef};
 use log::info;
 
-use super::region::PhysMemoryRegion;
+use super::{
+    frame::{AllocatedInfo, Frame, FrameAdapter, FrameList, TailInfo},
+    slab::slab::Slab,
+    smalloc::Smalloc,
+};
 
 // The maximum order for the buddy system. This corresponds to blocks of size
 // 2^MAX_ORDER pages.
 const MAX_ORDER: usize = 10;
 
-#[derive(Clone, Copy, Debug)]
-pub struct AllocatedInfo {
-    /// Current ref count of the allocated block.
-    pub ref_count: u32,
-    /// The order of the entire allocated block.
-    pub order: u8,
-}
-
-/// Holds metadata for a page that is part of an allocated block but is not the head.
-/// It simply points back to the head of the block.
-#[derive(Clone, Copy, Debug)]
-pub struct TailInfo {
-    pub head: PageFrame,
-}
-
-#[derive(Debug, Clone)]
-pub enum FrameState {
-    /// The frame has not yet been processed by the allocator's init function.
-    Uninitialized,
-    /// The frame is the head of a free block of a certain order.
-    Free { order: u8 },
-    /// The frame is the head of an allocated block.
-    AllocatedHead(AllocatedInfo),
-    /// The frame is a tail page of an allocated block.
-    AllocatedTail(TailInfo),
-    /// The frame is reserved by hardware/firmware.
-    Reserved,
-    /// The frame is part of the kernel's own image.
-    Kernel,
-}
-
-#[derive(Debug, Clone)]
-struct Frame {
-    state: FrameState,
-    link: LinkedListLink, // only used in free nodes.
-    pfn: PageFrame,
-}
-
-intrusive_adapter!(FrameAdapter = UnsafeRef<Frame>: Frame { link: LinkedListLink });
-
-impl Frame {
-    fn new(pfn: PageFrame) -> Self {
-        Self {
-            state: FrameState::Uninitialized,
-            link: LinkedListLink::new(),
-            pfn,
-        }
-    }
-}
-
-struct FrameAllocatorInner {
-    pages: &'static mut [Frame],
-    base_page: PageFrame,
-    total_pages: usize,
+pub(super) struct FrameAllocatorInner {
+    frame_list: FrameList,
     free_pages: usize,
     free_lists: [LinkedList<FrameAdapter>; MAX_ORDER + 1],
 }
 
 impl FrameAllocatorInner {
+    pub(super) fn free_slab(&mut self, frame: UnsafeRef<Frame>) {
+        assert!(matches!(frame.state, FrameState::Slab(_)));
+
+        // SAFETY: The caller should guarntee exclusive ownership of this frame
+        // as it's being passed back to the FA.
+        let frame = unsafe { &mut *UnsafeRef::into_raw(frame) };
+
+        // Restore frame state data for slabs.
+        frame.state = FrameState::AllocatedHead(AllocatedInfo {
+            ref_count: 1,
+            order: SLAB_FRAME_ALLOC_ORDER as _,
+        });
+
+        self.free_frames(PhysMemoryRegion::new(frame.pfn.pa(), SLAB_SIZE_BYTES));
+    }
+
     /// Frees a previously allocated block of frames.
     /// The PFN can point to any page within the allocated block.
     fn free_frames(&mut self, region: PhysMemoryRegion) {
@@ -108,8 +85,9 @@ impl FrameAllocatorInner {
         for order in initial_order..MAX_ORDER {
             let buddy_pfn = current_pfn.buddy(order);
 
-            if buddy_pfn < self.base_page
-                || buddy_pfn.value() >= self.base_page.value() + self.total_pages
+            if buddy_pfn < self.frame_list.base_page()
+                || buddy_pfn.value()
+                    >= self.frame_list.base_page().value() + self.frame_list.total_pages()
             {
                 break;
             }
@@ -140,23 +118,15 @@ impl FrameAllocatorInner {
 
         self.free_pages += 1 << initial_order;
     }
-    #[inline]
-    fn pfn_to_slice_index(&self, pfn: PageFrame) -> usize {
-        assert!(pfn.value() >= self.base_page.value(), "PFN is below base");
-        let offset = pfn.value() - self.base_page.value();
-        assert!(offset < self.pages.len(), "PFN is outside managed range");
-        offset
-    }
 
     #[inline]
     fn get_frame(&self, pfn: PageFrame) -> &Frame {
-        &self.pages[self.pfn_to_slice_index(pfn)]
+        unsafe { self.frame_list.get_frame(pfn).as_ref().unwrap() }
     }
 
     #[inline]
     fn get_frame_mut(&mut self, pfn: PageFrame) -> &mut Frame {
-        let idx = self.pfn_to_slice_index(pfn);
-        &mut self.pages[idx]
+        unsafe { self.frame_list.get_frame(pfn).as_mut().unwrap() }
     }
 
     fn add_to_free_list(&mut self, pfn: PageFrame, order: usize) {
@@ -182,7 +152,7 @@ impl FrameAllocatorInner {
 }
 
 pub struct FrameAllocator<CPU: CpuOps> {
-    inner: SpinLockIrq<FrameAllocatorInner, CPU>,
+    pub(super) inner: SpinLockIrq<FrameAllocatorInner, CPU>,
 }
 
 pub struct PageAllocation<'a, CPU: CpuOps> {
@@ -199,6 +169,25 @@ impl<CPU: CpuOps> PageAllocation<'_, CPU> {
 
     pub fn region(&self) -> &PhysMemoryRegion {
         &self.region
+    }
+
+    /// Leak the allocation as a slab allocation, for it to be picked back up
+    /// again once the slab has been free'd.
+    ///
+    /// Returns an `UnsafeRef` to `Frame` that was converted to a slab for use
+    /// in the slab lists.
+    pub(super) fn into_slab(self, slab_info: Slab) -> *const Frame {
+        let mut inner = self.inner.lock_save_irq();
+
+        let frame = inner.get_frame_mut(self.region.start_address().to_pfn());
+
+        debug_assert!(matches!(frame.state, FrameState::AllocatedHead(_)));
+
+        frame.state = FrameState::Slab(slab_info);
+
+        self.leak();
+
+        frame as _
     }
 }
 
@@ -270,8 +259,7 @@ impl<CPU: CpuOps> FrameAllocator<CPU> {
         }
 
         // Mark the final block metadata.
-        let pfn_idx = inner.pfn_to_slice_index(block_pfn);
-        inner.pages[pfn_idx].state = FrameState::AllocatedHead(AllocatedInfo {
+        inner.get_frame_mut(block_pfn).state = FrameState::AllocatedHead(AllocatedInfo {
             ref_count: 1,
             order: requested_order as u8,
         });
@@ -279,7 +267,7 @@ impl<CPU: CpuOps> FrameAllocator<CPU> {
         let num_pages_in_block = 1 << requested_order;
 
         for i in 1..num_pages_in_block {
-            inner.pages[pfn_idx + i].state =
+            inner.get_frame_mut(block_pfn.add_pages(i)).state =
                 FrameState::AllocatedTail(TailInfo { head: block_pfn });
         }
 
@@ -334,7 +322,7 @@ impl<CPU: CpuOps> FrameAllocator<CPU> {
     /// Returns the total number of pages managed by this allocator.
     #[inline]
     pub fn total_pages(&self) -> usize {
-        self.inner.lock_save_irq().total_pages
+        self.inner.lock_save_irq().frame_list.total_pages()
     }
 
     /// Returns the current number of free pages available for allocation.
@@ -348,7 +336,7 @@ impl<CPU: CpuOps> FrameAllocator<CPU> {
     /// # Safety
     /// It's unsafe because it deals with raw pointers and takes ownership of
     /// the metadata memory. It should only be called once.
-    pub unsafe fn init<T: AddressTranslator<()>>(mut smalloc: Smalloc<T>) -> Self {
+    pub unsafe fn init<T: AddressTranslator<()>>(mut smalloc: Smalloc<T>) -> (Self, FrameList) {
         let highest_addr = smalloc
             .iter_memory()
             .map(|r| r.end_address())
@@ -369,7 +357,7 @@ impl<CPU: CpuOps> FrameAllocator<CPU> {
             .expect("Failed to allocate memory for page metadata")
             .cast::<MaybeUninit<Frame>>();
 
-        let pages_uninit: &mut [MaybeUninit<Frame>] = unsafe {
+        let pages_list_uninit: &mut [MaybeUninit<Frame>] = unsafe {
             core::slice::from_raw_parts_mut(
                 metadata_addr.to_untyped().to_va::<T>().cast().as_ptr_mut(),
                 total_pages,
@@ -377,28 +365,32 @@ impl<CPU: CpuOps> FrameAllocator<CPU> {
         };
 
         // Initialize all frames to a known state.
-        for (i, p) in pages_uninit.iter_mut().enumerate() {
+        for (i, p) in pages_list_uninit.iter_mut().enumerate() {
             p.write(Frame::new(PageFrame::from_pfn(
                 lowest_addr.to_pfn().value() + i,
             )));
         }
 
         // The transmute is safe because we just initialized all elements.
-        let pages: &mut [Frame] = unsafe { transmute(pages_uninit) };
+        let pages: &mut [Frame] = unsafe { transmute(pages_list_uninit) };
+
+        let base_page = lowest_addr.to_pfn();
+
+        // SAFETY: We can only call this funcion once since it consumes smalloc
+        // on kernel boot. Therfore, we can only initialize the frmae list only
+        // once. Furthermore, we've just reseved the memory needed for the
+        // framelst from smalloc and initalised it with valid values.
+        let frame_list = unsafe { FrameList::new(pages, base_page) };
 
         let mut allocator = FrameAllocatorInner {
-            pages,
-            base_page: lowest_addr.to_pfn(),
-            total_pages,
+            frame_list: frame_list.clone(),
             free_pages: 0,
             free_lists: core::array::from_fn(|_| LinkedList::new(FrameAdapter::new())),
         };
 
         for region in smalloc.res.iter() {
             for pfn in region.iter_pfns() {
-                if pfn >= allocator.base_page
-                    && pfn.value() < allocator.base_page.value() + allocator.total_pages
-                {
+                if pfn >= base_page && pfn.value() < base_page.value() + frame_list.total_pages() {
                     allocator.get_frame_mut(pfn).state = FrameState::Kernel;
                 }
             }
@@ -425,17 +417,21 @@ impl<CPU: CpuOps> FrameAllocator<CPU> {
 
         info!(
             "Buddy allocator initialized. Managing {} pages, {} free.",
-            allocator.total_pages, allocator.free_pages
+            frame_list.total_pages(),
+            allocator.free_pages
         );
 
-        FrameAllocator {
-            inner: SpinLockIrq::new(allocator),
-        }
+        (
+            FrameAllocator {
+                inner: SpinLockIrq::new(allocator),
+            },
+            frame_list,
+        )
     }
 }
 
 pub trait PageAllocGetter<C: CpuOps>: Send + Sync + 'static {
-    fn global_page_alloc() -> &'static OnceLock<FrameAllocator<C>, C>;
+    fn global_page_alloc() -> &'static FrameAllocator<C>;
 }
 
 #[cfg(test)]
@@ -444,8 +440,8 @@ pub mod tests {
     use crate::{
         memory::{
             address::{IdentityTranslator, PA},
+            allocators::smalloc::RegionList,
             region::PhysMemoryRegion,
-            smalloc::{RegionList, Smalloc},
         },
         test::MockCpuOps,
     };
@@ -457,10 +453,14 @@ pub mod tests {
     const PAGE_SIZE: usize = 4096;
 
     pub struct TestFixture {
-        allocator: FrameAllocator<MockCpuOps>,
+        pub allocator: FrameAllocator<MockCpuOps>,
+        pub frame_list: FrameList,
         base_ptr: *mut u8,
         layout: Layout,
     }
+
+    unsafe impl Send for TestFixture {}
+    unsafe impl Sync for TestFixture {}
 
     impl TestFixture {
         /// Creates a new test fixture.
@@ -510,10 +510,11 @@ pub mod tests {
                     .unwrap();
             }
 
-            let allocator = unsafe { FrameAllocator::init(smalloc) };
+            let (allocator, frame_list) = unsafe { FrameAllocator::init(smalloc) };
 
             Self {
                 allocator,
+                frame_list,
                 base_ptr,
                 layout,
             }
@@ -601,7 +602,13 @@ pub mod tests {
 
         // The middle pages should be marked as Kernel
         let reserved_pfn = PageFrame::from_pfn(
-            fixture.allocator.inner.lock_save_irq().base_page.value()
+            fixture
+                .allocator
+                .inner
+                .lock_save_irq()
+                .frame_list
+                .base_page()
+                .value()
                 + (pages_in_max_block * 2 + 4),
         );
 

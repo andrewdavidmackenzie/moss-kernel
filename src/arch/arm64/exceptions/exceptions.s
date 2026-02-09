@@ -60,11 +60,11 @@ __vector_\handler:
     sub     sp, sp, #(16 * 18)
 
     // Detect stack overflow without clobbering GP registers.
-    msr     TPIDR_EL1, x0
+    msr     SP_EL0, x0
     mov     x0, sp
     //TODO: share this const value with Rust.
 	tbnz	x0, #15, 0f // #15 = KERNEL_STACK_SHIFT.
-    mrs     x0, TPIDR_EL1
+    mrs     x0, SP_EL0
     b       __impl_\handler
 
 0:  

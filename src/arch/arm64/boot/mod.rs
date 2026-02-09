@@ -1,6 +1,10 @@
 use super::{
     exceptions::{ExceptionState, secondary_exceptions_init},
-    memory::{fixmap::FIXMAPS, mmu::setup_kern_addr_space},
+    memory::{
+        fixmap::FIXMAPS,
+        heap::{KHeap, SLAB_ALLOC},
+        mmu::setup_kern_addr_space,
+    },
     proc::vdso::vdso_init,
 };
 use crate::drivers::timer::kick_current_cpu;
@@ -27,7 +31,7 @@ use libkernel::{
     error::Result,
     memory::{
         address::{PA, TPA, VA},
-        page_alloc::FrameAllocator,
+        allocators::{phys::FrameAllocator, slab::allocator::SlabAllocator},
     },
     sync::per_cpu::setup_percpu,
 };
@@ -55,7 +59,6 @@ global_asm!(include_str!("start.s"));
 /// 0xffff_8000_0000_0000 - 0xffff_8000_1fff_ffff | Kernel image
 /// 0xffff_8100_0000_0000 - 0xffff_8100_0000_1000 | VDSO (userspace)
 /// 0xffff_9000_0000_0000 - 0xffff_9000_0020_1fff | Fixed mappings
-/// 0xffff_b000_0000_0000 - 0xffff_b000_0400_0000 | Kernel Heap
 /// 0xffff_b800_0000_0000 - 0xffff_b800_0000_8000 | Kernel Stack (per CPU)
 /// 0xffff_d000_0000_0000 - 0xffff_d000_ffff_ffff | MMIO remap
 /// 0xffff_e000_0000_0000 - 0xffff_e000_0000_0800 | Exception Vector Table
@@ -105,11 +108,17 @@ fn arch_init_stage2(frame: *mut ExceptionState) -> *mut ExceptionState {
         .take()
         .expect("Smalloc should not have been taken yet");
 
-    let page_alloc = unsafe { FrameAllocator::init(smalloc) };
+    let (page_alloc, frame_list) = unsafe { FrameAllocator::init(smalloc) };
 
     if PAGE_ALLOC.set(page_alloc).is_err() {
         panic!("Cannot setup physical memory allocator");
     }
+
+    if SLAB_ALLOC.set(SlabAllocator::new(frame_list)).is_err() {
+        panic!("Cannot setup slab allocator");
+    }
+
+    KHeap::init_for_this_cpu();
 
     // Don't trap wfi/wfe in el0.
     SCTLR_EL1.modify(SCTLR_EL1::NTWE::DontTrap + SCTLR_EL1::NTWI::DontTrap);
@@ -145,6 +154,9 @@ fn arch_init_secondary(ctx_frame: *mut ExceptionState) -> *mut ExceptionState {
 
     // Don't trap secondaries wfi/wfe in el0.
     SCTLR_EL1.modify(SCTLR_EL1::NTWE::DontTrap + SCTLR_EL1::NTWI::DontTrap);
+
+    // Setup heap per-cpu data.
+    KHeap::init_for_this_cpu();
 
     // Enable interrupts and exceptions.
     secondary_exceptions_init();
