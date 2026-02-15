@@ -12,6 +12,8 @@ Regardless of stdlib, you will need:
 - [Homebrew](https://brew.sh)
 - QEMU (`brew install qemu`)
 - e2fsprogs (`brew install e2fsprogs`)
+  - run `brew link --force e2fsprogs` to get mkfs.ext4 into your $PATH
+- wget (`brew install wget`) is used by some scripts and is needed
 
 If building for the GNU library:
 - aarch64-unknown-linux-gnu (`brew tap messense/macos-cross-toolchains && brew install aarch64-unknown-linux-gnu`)
@@ -26,15 +28,21 @@ When it comes to Rust, you need the nightly toolchain. To install it, run:
 
 ### Building
 You can start building the initrd programs using this script:
-`./scripts/mac-experimental/build-deps.sh`
+```bash
+./scripts/mac-experimental/build-deps.sh
+ ```
 
 musl programs are built by default.
 
 If you want GNU program builds:
-`stdlib=gnu ./scripts/mac-experimental/build-deps.sh`
+```bash
+stdlib=gnu ./scripts/mac-experimental/build-deps.sh
+```
 
 After building, you can make the initrd with:
-`./scripts/mac-experimental/create-image.sh`
+```bash
+./scripts/mac-experimental/create-image.sh
+```
 
 The initrd should now be at `./moss.img`.
 
