@@ -28,15 +28,21 @@ When it comes to Rust, you need the nightly toolchain. To install it, run:
 
 ### Building
 You can start building the initrd programs using this script:
-`./scripts/mac-experimental/build-deps.sh`
+```bash
+./scripts/mac-experimental/build-deps.sh
+ ```
 
 musl programs are built by default.
 
 If you want GNU program builds:
-`stdlib=gnu ./scripts/mac-experimental/build-deps.sh`
+```bash
+stdlib=gnu ./scripts/mac-experimental/build-deps.sh
+ ```
 
 After building, you can make the initrd with:
-`./scripts/mac-experimental/create-image.sh`
+```bash
+./scripts/mac-experimental/create-image.sh
+ ```
 
 The initrd should now be at `./moss.img`.
 
