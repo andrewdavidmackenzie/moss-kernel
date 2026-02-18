@@ -3,6 +3,11 @@
 #![feature(used_with_arg)]
 #![feature(likely_unlikely)]
 #![feature(box_as_ptr)]
+#![expect(internal_features)]
+#![feature(core_intrinsics)]
+#![feature(custom_test_frameworks)]
+#![reexport_test_harness_main = "test_main"]
+#![test_runner(crate::testing::test_runner)]
 
 use alloc::{
     boxed::Box,
@@ -45,6 +50,8 @@ mod memory;
 mod process;
 mod sched;
 mod sync;
+#[cfg(test)]
+pub mod testing;
 
 #[panic_handler]
 fn on_panic(info: &PanicInfo) -> ! {
@@ -160,6 +167,9 @@ async fn launch_init(mut opts: KOptions) {
             .insert(console.clone())
             .expect("Could not clone FD");
     }
+
+    #[cfg(test)]
+    test_main();
 
     drop(task);
 
