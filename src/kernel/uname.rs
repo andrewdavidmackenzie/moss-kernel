@@ -127,17 +127,20 @@ mod tests {
         };
 
         let build_num = parts.next().unwrap(); // "#1"
-        let sysname = parts.next().unwrap(); // "Moss"
-        let smp = parts.next().unwrap(); // "SMP"
-        let datetime = parts.next().unwrap(); // "Tue Feb 20 12:34:56 UTC 2024"
-
         assert!(
             build_num.starts_with('#'),
             "Build number should start with '#'"
         );
-        assert_eq!(sysname, "Moss");
-        assert_eq!(smp, "SMP");
 
+        let sysname = parts.next().unwrap(); // "Moss"
+        assert_eq!(sysname, "Moss");
+
+        if smp {
+            let smp = parts.next().unwrap(); // "SMP"
+            assert_eq!(smp, "SMP");
+        }
+
+        let datetime = parts.next().unwrap(); // "Tue Feb 20 12:34:56 UTC 2024"
         validate_datetime(datetime)
     }
 
