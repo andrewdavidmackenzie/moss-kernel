@@ -1,10 +1,10 @@
 use crate::kernel::hostname::hostname;
 use crate::{
     arch::{Arch, ArchImpl},
-    memory::uaccess::{UserCopyable, copy_to_user},
+    memory::uaccess::{copy_to_user, UserCopyable},
 };
 use alloc::ffi::CString;
-use core::{ffi::c_char};
+use core::ffi::c_char;
 use core::ffi::CStr;
 use core::str::FromStr;
 use libkernel::{error::Result, memory::address::TUA};
@@ -92,13 +92,15 @@ pub async fn sys_uname(uts_ptr: TUA<OldUtsname>) -> Result<usize> {
 
 #[cfg(test)]
 mod tests {
-    use core::ffi::CStr;
     use crate::kernel::uname::{build_utsname, SYSNAME};
+    use crate::ktest;
+    use core::ffi::CStr;
 
-    #[test]
-    fn version_conforms_to_format() {
-        let uts = build_utsname();
-        let sysname_cstr = unsafe { CStr::from_ptr(uts.sysname.as_ptr()) };
-        assert_eq!(sysname_cstr, SYSNAME);
+    ktest! {
+        fn sysname_correct() {
+            let uts = build_utsname();
+            let sysname_cstr = unsafe { CStr::from_ptr(uts.sysname.as_ptr()) };
+            assert_eq!(sysname_cstr, SYSNAME);
+        }
     }
 }
