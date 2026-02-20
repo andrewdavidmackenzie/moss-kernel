@@ -10,6 +10,11 @@ name = "moss"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "moss"
+test = true
+bench = false
+
 [dependencies]
 libkernel = { path = "libkernel" }
 aarch64-cpu = "11.1.0"

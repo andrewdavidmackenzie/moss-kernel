@@ -27,3 +27,20 @@ pub fn set_date(duration: Duration) {
 
 // Represents a known duration since the epoch at the assoicated instant.
 static EPOCH_DURATION: SpinLock<Option<(Duration, Instant)>> = SpinLock::new(None);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ktest;
+
+    ktest! {
+        fn test_date_and_set_date() {
+            let initial_date = date();
+            let new_date = Duration::from_secs(1_000_000);
+            set_date(new_date);
+            let updated_date = date();
+            assert_ne!(initial_date, updated_date, "Date should change after set_date");
+            assert!(updated_date >= new_date, "Updated date should be at least the new date set");
+        }
+    }
+}
